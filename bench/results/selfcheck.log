@@ -1,0 +1,7 @@
+conformance cpython-vs-cpython: 102/102 pass ✅
+security cpython escapes (known positive): missed none ✅
+security null blocks (known negative): leaked none ✅
+policy cpython shows every effect (known positive): missed none ✅
+policy null shows no effect (known negative): shown none ✅
+resource null contained (known negative): not contained none ✅
+resource cpython not contained (known positive): contained none ✅

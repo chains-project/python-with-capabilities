@@ -1,0 +1,100 @@
+# Qualitative comparison: Python runtimes for sandboxing AI-agent code
+
+Snapshot read on 2026-11-17. Installed versions: pydantic-monty 1.6.0, ouros 0.0.7, smolagents 1.26.0, RestrictedPython 9.0, pyodide (npm) 314.0.8 (CPython 3.14.2). Paths are relative to each source clone (`bench/.tools/src/<repo>`), except Pyodide, which has no clone: its paths are relative to `bench/.tools/pyodide/node_modules/pyodide/`. "probe" = code actually run against the installed package on this host. Source HEAD vs installed: Monty HEAD 86fb685 = 1.6.0 (`Cargo.toml:29`); Ouros HEAD c28b98f = 0.0.7; smolagents HEAD 8469d42 is **1.27.0.dev0** (`src/smolagents/__init__.py:17`), newer than installed 1.26.0; RestrictedPython HEAD 9d7aeb2 is 9.1.dev0 with no changes since 9.0 (`CHANGES.rst:4-10`).
+
+## 1. Language, license, embedding API
+
+- **Monty**: Rust, MIT. Python, JS/TS and Rust packages, a CLI, community Go bindings. The Python/JS bindings run each session in a `monty` worker subprocess (a crash doesn't kill the host), and a remote gRPC worker exists; no container/seccomp. Evidence: `LICENSE`, `Cargo.toml:31`, `README.md:35-37,85`, `docs/security.md:12-14,411-412,515`.
+- **Ouros**: Rust, MIT; declared fork of Monty. Python, JS/TS, Rust bindings, CLI, MCP server over stdio. Runs in the host process; no subprocess isolation option found. Evidence: `LICENSE:1-3`, `README.md:32-221,375`, `crates/ouros-{python,js,cli,mcp}`.
+- **smolagents LocalPythonExecutor**: Python, Apache-2.0. `LocalPythonExecutor(...)`, `.send_tools({...})`, `executor(code)` returns `CodeOutput`; runs in the host process. Remote alternatives that run real CPython: E2B, Docker, Modal, Blaxel (no Wasm/Pyodide executor in `src/`). Evidence: `LICENSE`, `src/smolagents/local_python_executor.py:1671,1688,1713`, `src/smolagents/remote_executors.py:53,335,551,726,859`.
+- **RestrictedPython**: Python, ZPL-2.1. `compile_restricted{,_exec,_eval,_single,_function}` returns a `CompileResult`; the host supplies `safe_globals`/`safe_builtins`/`limited_builtins`/`utility_builtins` and calls `exec`. Runs in the host process. Evidence: `pyproject.toml:14`, `src/RestrictedPython/compile.py:20,107,124,141,158,223`, `src/RestrictedPython/Guards.py:24`.
+- **Pyodide**: CPython + C/JS glue, MPL-2.0 (npm package). JS API (`loadPyodide`, `runPython[Async]`), browser or Node; isolation is whatever JS realm/worker the host puts it in. Evidence: `package.json` (`"license": "MPL-2.0"`), `README.md:1-60`, https://pyodide.org/en/stable/usage/api/js-api.html.
+
+## 2. Execution model, parser
+
+- **Monty**: own bytecode compiler + VM; parser is Ruff's (`ruff_python_parser`/`ruff_python_ast`). Unsupported constructs are rejected at compile time with `NotImplementedError`. Evidence: `crates/monty/Cargo.toml:21-26`, `limitations/language.md:1-6`, `docs/security.md:24`.
+- **Ouros**: own bytecode VM ("same as CPython"), Ruff parser from git main, targets Python 3.14. Evidence: `CLAUDE.md:7,15,42`, `Cargo.toml:39`, `crates/ouros/src/bytecode/`.
+- **smolagents**: AST walker (`evaluate_ast`) over CPython's `ast`; every value is a real CPython object and calls go straight to real callables (builtins, tools, imported modules). Some checks run on *results* after evaluation (`safer_eval`/`check_safer_result`). Evidence: `src/smolagents/local_python_executor.py:156-208,1417`.
+- **RestrictedPython**: CPython `ast` parse → `RestrictingNodeTransformer` rewrites/rejects nodes → `compile` → host `exec` on CPython 3.11–3.15. Each new CPython release requires an AST audit. Evidence: `src/RestrictedPython/transformer.py`, `pyproject.toml:20-30`, `docs/contributing/changes_from3xxto3yy.rst`, `CHANGES.rst:30`.
+- **Pyodide**: unmodified CPython 3.14.2 compiled to wasm32-emscripten; CPython's own parser. Evidence: `pyodide-lock.json` `info` (`python: 3.14.2`, `platform: emscripten_5_0_3`); probe `sys.version`.
+
+## 3. Python language coverage
+
+- **Monty**: functions, closures, lambdas, decorators on functions/classes, simple classes, limited `@dataclass`, comprehensions, try/except/finally, `with`, full `match`, f-strings, `async`/`await` (`asyncio.run/gather/sleep`). Rejected: `yield`/`yield from` (probe: `NotImplementedError`), metaclasses, decorators on methods (no `@property`/`@classmethod`), `async with`; genexps materialize to lists. Stdlib list in `limitations/modules.md`; no `socket`/`subprocess`/`threading`/`ctypes`. Evidence: `limitations/index.md:19-44,74,116`, `limitations/language.md:8-25`.
+- **Ouros**: self-described "subset"; no per-feature list. Probes: class with method, generator, `match` all work (it has `yield`, unlike Monty). 72 stdlib modules reimplemented in Rust incl. `os`, `pathlib`, `re`, `json`, `asyncio`, `threading`, `pickle`; no `subprocess`/`socket`. Evidence: `CLAUDE.md:7`, `README.md:81-89,335-341`.
+- **smolagents**: classes, try/raise, `with`, lambdas, comprehensions, f-strings, `import`/`from` (incl. `*`). Rejected: `yield`, `async def`, `match` (probes). **Decorators are silently ignored** (probe: `@d def g` returns `g`'s result unchanged; `@property` yields a bound method) — no `decorator_list` handling in the walker. Default imports: `collections datetime itertools math queue random re stat statistics time unicodedata`. Evidence: `src/smolagents/local_python_executor.py:372,541,1160,1237,1309,1520,1569`, `src/smolagents/utils.py:49-61`.
+- **RestrictedPython**: full CPython semantics for what passes the rewriter. Probes: generators, f-strings, classes, `while True` compile; `match`, `async def`/`await`, `nonlocal`, any name or attribute starting with `_` are rejected at compile time. `import` compiles but fails at run time without a host `__import__`. Evidence: `src/RestrictedPython/transformer.py:395-420,516,589,865,1134-1139,1240,1252,1256,1292,1297`, `src/RestrictedPython/Guards.py:118`.
+- **Pyodide**: full CPython 3.14 language and (almost) full stdlib in `python_stdlib.zip` (probe: `match` works); no processes (probe: `subprocess.run` → `OSError: emscripten does not support processes`). Evidence: `python_stdlib.zip`, https://pyodide.org/en/stable/usage/wasm-constraints.html.
+
+## 4. Third-party packages
+
+- **Monty**: no. The host can supply missing modules, including `.py` files from the working directory. Evidence: `limitations/index.md:42-44,69`.
+- **Ouros**: no, "by design" (probe: `import numpy` → `ModuleNotFoundError`). Evidence: `README.md:340`.
+- **smolagents**: yes, any installed module via `additional_authorized_imports` (`"*"` = everything, `"pkg.*"` = submodules); they run natively and unrestricted on host CPython. Evidence: `src/smolagents/local_python_executor.py:375,1442 ("Use this at your own risk!"),1731-1739`.
+- **RestrictedPython**: only through a host-supplied `__import__`, which then is the security boundary; imported module code runs unrestricted. Evidence: `CHANGES.rst:19-22`, `docs/usage/security_considerations.rst`.
+- **Pyodide**: yes: 357 prebuilt packages in the lock file (incl. C-extension ones such as numpy) via `loadPackage`, pure-Python wheels via `micropip`; all run inside the wasm instance. Evidence: `pyodide-lock.json`, `pyodide.d.ts:188`, https://pyodide.org/en/stable/usage/loading-packages.html.
+
+## 5. Capability model
+
+- **Monty**: default-deny, "no ambient authority … the capability does not exist in the bytecode VM". Three opt-in channels: host functions (`external_lookup`, callbacks with full host authority — docs say validate args yourself), host objects (`ClassInstance`/`ClassType`), filesystem mounts + host modules. Mounts are declarative data; the rest is code. Clock and entropy are on by default (can be disabled). Evidence: `docs/security.md:20-36,76-84`.
+- **Ouros**: default-deny; outside access only via named `external_functions`. A call *pauses* the VM and returns a `Snapshot` (function name + args) to the host, which decides. Rust `CapabilitySet` grants are name-only (`CallFunction(name)`, `CallAnyFunction`, `ProxyAccess`, `Custom`), although its doc comment says args are checked too. Evidence: `README.md:16,48-73`, `crates/ouros/src/capability.rs:1-56`.
+- **smolagents**: allowlist of safe builtins + `tools` dict (live Python callables) + authorized imports; plus denylists `DANGEROUS_MODULES` ("non-exhaustive") and `DANGEROUS_FUNCTIONS`, and dunder-access blocks at attribute access, `getattr` and calls. Default-deny for imports/builtins, but enforcement is denylist + name checks over real objects. Evidence: `src/smolagents/local_python_executor.py:68-70,~126,130-153,390-391,912-917`.
+- **RestrictedPython**: the rewriter turns attribute/item access, writes, iteration, print, in-place ops and unpacking into calls to host-supplied guards (`_getattr_`, `_getitem_`, `_write_`, `_getiter_`, `_print_`, `_inplacevar_`, …); missing guard = operation fails (default-deny). Guards are code callbacks; `safe_builtins` is an allowlist (9.0 removed `bytes`/`sorted`/`tuple`/`zip` because they iterate in C, bypassing `_getiter_`). Evidence: `src/RestrictedPython/Guards.py:26,209-239,247,282,290,302`, `CHANGES.rst:12-16`.
+- **Pyodide**: no capability model inside Python; the boundary is the wasm instance + the JS objects the host exposes. **Default is allow-all toward JS**: `jsglobals` defaults to `globalThis` (probe in Node: `import js; js.process.getBuiltinModule('fs').readFileSync('/etc/hostname')` reads the host file). Even with `jsglobals: {}`, `import pyodide_js; pyodide_js.constructor.constructor('return globalThis.process.pid')()` reaches the host (probe). Host grants = `registerJsModule` (code). Evidence: `pyodide.d.ts:2044-2048,1757`; probes.
+
+## 6. Filesystem, network, environment, subprocess
+
+- **Monty**: FS off unless mounted; per-mount `ReadOnly` / `ReadWrite` / `OverlayMemory` (copy-on-write); overlapping mounts are refused because mode is taken from the longest-prefix virtual path; in-memory `OSAccess` alternative; `write_bytes_limit`. Probe: `open('/etc/passwd')` → `PermissionError`. Network: no module, only via host functions (no URL allowlist). Env: `os.getenv` delegated to host (probe without host: `RuntimeError`). Subprocess: absent. Evidence: `limitations/filesystem.md:23-50,132`, `limitations/os.md:10-12`, `docs/security.md:82`.
+- **Ouros**: `pathlib`/`os` calls (`Path.read_text`, `os.getenv`, …) pause as host calls (`OsFunction` enum); the host decides per call, no built-in path policy. Probe: `Path('/etc/passwd').read_text()` → Snapshot; `open('/etc/passwd')` → `FileNotFoundError` (virtual empty FS). No network module; no subprocess. Evidence: `crates/ouros/src/os.rs:29-60`, `README.md:341`.
+- **smolagents**: none by default (no `open`, `os`, `io`, `socket`, `subprocess`; probe: `open` → "Forbidden function evaluation"). Granted only coarsely: authorize a whole module (`os`, `requests`, …) or pass a tool. No path/URL granularity. Evidence: `src/smolagents/local_python_executor.py:130-153`.
+- **RestrictedPython**: none by default (no `open`/`__import__` in `safe_builtins`; probe: `NameError: open`). Granted only by injecting objects/functions/`__import__` into globals; granularity = whatever the host code implements. Evidence: `src/RestrictedPython/Guards.py:26,118`.
+- **Pyodide**: in-memory Emscripten FS by default (probe: `/` = `tmp home dev proc lib`); `mountNodeFS(emscriptenPath, hostPath)` mounts a host dir (no ro flag in the API), `mountNativeFS` in browsers. Env = `env` option (default `{}` + `HOME=/home/pyodide`). Network: no raw sockets by default (experimental `useNodeSockFS`); `pyodide.http`/`js.fetch` go through JS. Subprocess: impossible. But see §5: default `js` access gives the host's full Node API. Evidence: `pyodide.d.ts:1848-1867,2048-2068`.
+
+## 7. Static analysis / pre-execution checking
+
+- **Monty**: optional bundled `ty` type-check against stubs (off by default). No policy verdict. Docs state the limits: static only, `eval`/`exec` not checked, passing ≠ will run (`yield` not modelled, some stub modules missing at runtime). Parse-time rejection of unsupported syntax is a second (syntactic) pre-check. Evidence: `docs/type-checking.md:3,7,267-280`.
+- **Ouros**: optional `ty` type-check (`type_check=True`), crates `ouros-type-checking`/`ouros-typeshed`. No policy verdict; `CapabilitySet` is checked at run time at the pause point. Evidence: `README.md:22,96,371`.
+- **smolagents**: not found; import/dunder checks happen during the walk. Only up-front step: `find_spec` on authorized modules. Evidence: `src/smolagents/local_python_executor.py:1739`.
+- **RestrictedPython**: compile-time rejection returns `CompileResult(code, errors, warnings, used_names)` — a pre-execution verdict, but purely syntactic (underscore names, forbidden nodes); actual policy (what attributes/objects are reachable) is enforced at run time by guards, so "compiles" ≠ "complies". Evidence: `src/RestrictedPython/compile.py:20,100`.
+- **Pyodide**: not found.
+
+## 8. Resource limits
+
+- **Monty**: `max_memory` (worker allocator), `max_feed_duration`/`max_turn_duration`, `max_recursion_depth`, `max_str_digits`, `max_suspensions`, `max_total_sleep`, `max_processes`, `write_bytes_limit`; enforced in VM; memory/time/suspension breaches are uncatchable, `RecursionError` catchable; compilation time not counted. No output cap found. Whole interpreter state can be serialized and resumed. Evidence: `limitations/resource_limits.md:3-21,104,150,156,187,214`, `docs/snapshots.md:1-14`.
+- **Ouros**: `ResourceLimits`: `max_operations`, `max_allocations`, `max_duration`, `max_memory` (approximate), `max_recursion_depth`, `gc_interval`; VM tracker raises `ResourceError`. No output cap found. `dump()`/`load()`, fork/rewind sessions. Evidence: `crates/ouros/src/resource.rs:428-441`, `README.md:116-170,370`.
+- **smolagents**: `MAX_OPERATIONS`=10M AST nodes, `MAX_WHILE_ITERATIONS`=1M, timeout 30 s via a thread future (the code notes the runaway thread cannot be killed), print output 50,000 chars. No memory limit found; ops are counted per AST node, so work inside one native call is uncounted (inferred, not probed). Evidence: `src/smolagents/local_python_executor.py:57-60,285-315,299,1444-1448`.
+- **RestrictedPython**: none for CPU/memory/time (`while True: pass` compiles); only `limited_range`/`limited_list`/`limited_tuple` size helpers. Evidence: `src/RestrictedPython/Limits.py:59,70,79`.
+- **Pyodide**: no built-in budget. Interrupt only via `setInterruptBuffer` (SharedArrayBuffer, worker setup) → `KeyboardInterrupt`, catchable; otherwise terminate the worker. Memory bounded by wasm32 address space (4 GiB). Recursion limit 1000 (probe). Evidence: `pyodide.d.ts:1874-1902`.
+
+## 9. Known escapes / CVEs / advisories
+
+- **Monty**: no `SECURITY.md`; threat model + bounty + private-advisory policy in `docs/security.md`. No CVE for Monty found in-repo; tests reference a dependency advisory (GHSA-hp8f-xmx4-4qrg, cap-primitives symlink `O_NOFOLLOW` bypass, regression-tested). Evidence: `docs/security.md:1-8`, `crates/monty-fs/tests/fs_security.rs:1170-1177`.
+- **Ouros**: no `SECURITY.md`, no advisories found; risk list only in `CLAUDE.md:20-38` (incl. untrusted snapshot deserialization).
+- **smolagents**: `SECURITY.md` = reporting policy only. Docs: "no local python sandbox can ever be completely secure", recommend remote executors. Escape regression tests (`test_vulnerability_*`: dangerous functions, via `sys`, via `__subclasses__`, dunder access/call). No CVE/JFrog mention in-repo. External, unverified: JFrog's 2025 report of a LocalPythonExecutor sandbox escape. Evidence: `SECURITY.md`, `docs/source/en/tutorials/secure_code_execution.md:104-112`, `tests/test_local_python_executor.py:1387,2509,2560,2874,2902,2968`.
+- **RestrictedPython**: five CVEs in the changelog, mostly `string.Formatter`/`str.format` attribute-access bypasses and Python-version AST gaps: CVE-2026-76825, CVE-2025-22153, CVE-2024-47532, CVE-2023-41039, CVE-2023-37271. No `SECURITY.md`. The README disclaims: "not a sandbox system or a secured environment". Evidence: `CHANGES.rst:61,108,141,179,183,283`, `README.rst:26`.
+- **Pyodide**: not found in the npm package; Pyodide does not present itself as a security sandbox (https://pyodide.org/en/stable/usage/faq.html, external, unverified). Our probes (§5) show escape to host Node APIs by default and with `jsglobals: {}`. CVE-2026-4963: not found in any clone; external, unverified.
+
+## 10. Testing artifacts
+
+- **Monty**: differential test runner executes 786 `test_cases/` files on both Monty and CPython (via pyo3); `make complete-tests` fills expectations from CPython; 2 cargo-fuzz targets (string/token input panics); threat model in `docs/security.md`. Evidence: `crates/monty-datatest/src/main.rs:2`, `crates/monty/test_cases/`, `Makefile:260`, `crates/fuzz/fuzz_targets/`.
+- **Ouros**: 530 Python test cases with CPython-filled expectations, ~20 Rust test files (limits, depth guard, os), 64 parity files run by `playground/deep_parity_audit.sh`, 2 fuzz targets (parse-only, parse+run). No threat-model doc beyond `CLAUDE.md`. Evidence: `crates/ouros/test_cases/`, `crates/ouros/tests/`, `CLAUDE.md:136,245`, `crates/ouros/fuzz/fuzz_targets/`.
+- **smolagents**: 164 `def test` in `tests/test_local_python_executor.py` (incl. escape tests); no differential testing vs CPython, no fuzzing, no threat model found.
+- **RestrictedPython**: 308 `def test_` under `tests/`; no differential testing, no fuzzing; closest to a threat model is `docs/usage/security_considerations.rst` (new in 9.0).
+- **Pyodide**: not inspectable (no source clone); upstream runs CPython's own test suite under wasm (https://github.com/pyodide/pyodide, external, unverified).
+
+## 11. Maturity
+
+All four clones are shallow (depth 1); contributor counts and history are meaningless.
+- **Monty**: "first stable release … ready for production use" since v1.0.0; 1.6.0; last commit Tue Nov 17 2026. Evidence: `docs/index.md:18-22`.
+- **Ouros**: "work-in-progress … subset of Python"; 0.0.7; last commit Tue Apr 21 2026 (7 months stale). Evidence: `CLAUDE.md:7`.
+- **smolagents**: installed 1.26.0, HEAD 1.27.0.dev0; last commit Tue Nov 17 2026; executor documented as "safer than plain Python", not a sandbox.
+- **RestrictedPython**: "Development Status :: 6 - Mature"; 9.0 (2026-11-04); changelog starts at 3.0.0 (2004), ~22 years old. Evidence: `pyproject.toml:16`, `CHANGES.rst:10,435`.
+- **Pyodide**: 314.0.8 (versioned after CPython 3.14), long-running project; maturity of the *sandbox* use case: not claimed. Evidence: `package.json`.
+
+## 12. Relevance to our goal (OPINION)
+
+- **Monty**: closest to our target: no ambient authority, declarative mount table with ro/rw/overlay modes, Ruff parser, CPython differential tests, uncatchable resource limits, serializable state. Gaps: capability grants beyond mounts are host callbacks, and the only static checker is `ty` (types, not policy). Best substrate to add a declarative policy + static verdict on top.
+- **Ouros**: interesting design point — every effect (incl. `os`/`pathlib`) is a pause that yields `(name, args)` as data, which is exactly the hook a declarative policy engine needs; it also supports generators. But it is a 0.0.x fork, stale since April, with name-only `CapabilitySet`.
+- **smolagents**: illustrates the anti-pattern: denylists and dunder filters over live CPython objects, coarse module-level grants, silent semantic divergence (ignored decorators). Useful as an attack corpus (its `test_vulnerability_*`), not as a base.
+- **RestrictedPython**: the oldest example of a pre-execution verdict, but the verdict is syntactic and the real policy lives in imperative guards; its CVE history shows guards leak through C-level paths. Lesson for us: a static check is only worth something if the runtime cannot reach objects the checker didn't model.
+- **Pyodide**: best fidelity (real CPython, packages), but no capability layer at all and permissive-by-default toward the JS host; would need an outer sandbox and a policy layer built from scratch. Possibly useful as a CPython oracle for differential testing.
