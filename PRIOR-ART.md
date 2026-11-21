@@ -100,14 +100,14 @@ Not benchmarked:
 - [RustPython](https://github.com/RustPython/RustPython): a general interpreter, not a sandbox.
 - [pyex.dev](https://pyex.dev/): not inspected.
 
-### Benchmark findings (2026-11-17)
+### Benchmark findings (2026-11-21)
 
-Full tables are in `bench/results/2026-11-17.md`, and the evidence per tool is in `bench/QUALITATIVE.md`.
+Full tables are in `bench/results/2026-11-21.md`, and the evidence per tool is in `bench/QUALITATIVE.md`.
 
 - **Conformance**: the share of 102 scripts that match CPython 3.14 (stdout and exit code):
   - Pyodide: 100;
   - Ouros: 83;
-  - Monty: 74;
+  - Monty: 75;
   - smolagents: 64;
   - RestrictedPython: 51.
 
@@ -120,7 +120,8 @@ Full tables are in `bench/results/2026-11-17.md`, and the evidence per tool is i
     - `!r` in f-strings is ignored.
   - Ouros (3): `round(2.675, 2)` is wrong, and two `datetime` scripts print an internal source location instead of
     dates.
-  - Monty (2): the same `round` error, and a caught `assert` prints an extra line.
+  - Monty (1): the same `round` error. Its pytest-style `assert` messages are a documented divergence, turned off
+    in the benchmark with `assert_message_annotations=False`.
 
   RestrictedPython compiles the agent's code with its own module's `from __future__ import annotations` inherited, so
   annotations become strings.
@@ -150,10 +151,10 @@ Full tables are in `bench/results/2026-11-17.md`, and the evidence per tool is i
     power or a sleep.
   - RestrictedPython contains only recursion.
   - Pyodide contains none.
-- **Performance** (median of 5 runs): CPython 100 ms startup, Monty 187 ms, Ouros 81 ms, smolagents 772 ms, Pyodide
-  4.3 s.
-  - Monty runs computation at 1.1–2.6× CPython's time, and Ouros at 1.1–5.5×.
-  - smolagents' AST walker is 5–80× slower than CPython (recursive fib(25): 9.8 s, against 0.12 s).
+- **Performance** (median of 5 runs): CPython 57 ms startup, Monty 111 ms, Ouros 42 ms, smolagents 491 ms, Pyodide
+  3.1 s.
+  - Monty runs computation at 0.95–3.1× CPython's time, and Ouros at 1.0–6.0×.
+  - smolagents' AST walker is 6–100× slower than CPython (recursive fib(25): 6.7 s, against 0.07 s).
   - RestrictedPython's `limited_builtins` caps `range()` at 1000 elements, so most perf tasks fail.
 
 ## Isolation outside the interpreter

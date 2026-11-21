@@ -13,7 +13,7 @@ for agent code. Sister project: [bash-with-capabilities](https://github.com/chai
 ## Main take-away: Monty is the best
 
 [Monty](https://github.com/pydantic/monty) (Pydantic, Rust) is the best in-process Python sandbox for agents in our
-benchmark of 2026-11-17. The others are [Ouros](https://github.com/parcadei/ouros),
+benchmark of 2026-11-21. The others are [Ouros](https://github.com/parcadei/ouros),
 [smolagents](https://github.com/huggingface/smolagents)' LocalPythonExecutor,
 [RestrictedPython](https://github.com/zopefoundation/RestrictedPython) and [Pyodide](https://pyodide.org).
 
@@ -26,14 +26,17 @@ benchmark of 2026-11-17. The others are [Ouros](https://github.com/parcadei/ouro
 - 🧯 **Contains runaway code.** Its time limit cannot be caught by the code it stops: it stops infinite loops,
   exception-swallowing loops, recursion, regex backtracking and huge powers. Memory caps exist
   but are off by default.
-- ⚡ **Fast.** Monty runs at 1.1–2.6× CPython's time, with a separate worker process and 26 MiB peak RSS.
-  smolagents is 5–80× slower than CPython, and Pyodide needs 4.3 s just to start.
+- ⚡ **Fast.** Monty runs at 0.95–3.1× CPython's time, with a separate worker process and 26 MiB peak RSS.
+  smolagents is 6–100× slower than CPython, and Pyodide needs 3.1 s just to start.
 
 Caveats:
 
-- Monty covers a subset of Python: 74 of 102 conformance scripts match CPython. The gaps are mostly in classes (4/11:
+- Monty covers a subset of Python: 75 of 102 conformance scripts match CPython. The gaps are mostly in classes (4/11:
   decorators on methods, `@property`), generators and some stdlib modules. Most failures are loud.
-- It has 2 silent errors: `round(2.675, 2)` returns `2.68`, and a caught `assert` prints an extra line.
+- It has 1 silent error: `round(2.675, 2)` returns `2.68` (fixed upstream in
+  [pydantic/monty#1378](https://github.com/pydantic/monty/pull/1378), after 1.6.0).
+- Its default pytest-style `assert` messages differ from CPython by design; the benchmark turns them off with
+  `assert_message_annotations=False`.
 - It cannot run third-party packages.
 - Grants other than mounts are host callbacks (code), and its only static check is a type checker, not a policy
   checker.
@@ -57,7 +60,7 @@ and 51 of 102, with 6 silent errors for smolagents.
     - resource exhaustion (9 probes);
     - performance (9 tasks).
   - A qualitative rubric with evidence ([`bench/QUALITATIVE.md`](bench/QUALITATIVE.md)).
-  - Results: [`bench/results/2026-11-17.md`](bench/results/2026-11-17.md).
+  - Results: [`bench/results/2026-11-21.md`](bench/results/2026-11-21.md).
 
 ## Reproduce
 

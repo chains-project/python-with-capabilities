@@ -22,8 +22,11 @@ def emit(stream: str, text: str) -> None:
     sys.stdout.flush()
 
 
+# assert_message_annotations=False: Monty's default pytest-style assert messages are a documented, opt-out
+# divergence (docs/limitations/assert.md); we score its CPython-compatible mode.
 try:
-    with pm.Monty() as pool, pool.checkout(limits={"max_feed_duration_secs": 10.0}) as session:
+    with pm.Monty() as pool, pool.checkout(limits={"max_feed_duration_secs": 10.0},
+                                          assert_message_annotations=False) as session:
         session.feed_run(code, external_lookup=granted_functions(policy), print_callback=emit,
                          mount=mounts or None, cwd="/work" if mounts else None, os=os_cb)
 except pm.MontyError as e:
